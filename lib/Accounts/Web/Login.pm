@@ -201,6 +201,7 @@ sub login ($$$) {
         $cb = $url;
       }
       
+      delete $session_data->{handoff_request} if $path->[0] eq 'login' and not defined $app->bare_param ('handoff_client');
       my $state = id 50;
       my $scope = join $server->{scope_separator} // ' ', grep { defined }
           ## Both /login and /link uses |login_scope|.
@@ -218,6 +219,11 @@ sub login ($$$) {
       };
       
       my $sk_context = $session_row->get ('sk_context');
+      if (defined $app->bare_param ('handoff_client')) {
+        return $app->send_error_json ({reason => 'Invalid handoff request'}) if $path->[0] ne 'login';
+        eval { Accounts::Web::Handoff->prepare ($app, $session_data, $sk_context, $server->{name}) };
+        return $app->send_error_json ({reason => 'Invalid handoff request'}) if $@;
+      }
       my $client_id = $app->config->get ($server->{name} . '.client_id.' . $sk_context) //
                       $app->config->get ($server->{name} . '.client_id');
       my $client_secret = $app->config->get ($server->{name} . '.client_secret.' . $sk_context) //
@@ -453,6 +459,7 @@ sub login ($$$) {
             my $app_data = $session_data->{action}->{app_data};
             return $app->send_json ({
               needs_account_selection => 1,
+              ($session_data->{handoff_request} ? (has_handoff => 1) : ()),
               accounts => $result->{accounts},
             });
           } else {
@@ -1948,6 +1955,8 @@ sub finalize_login_session ($$$) {
     }
   }
 
+  Accounts::Web::Handoff->verified ($session_data);
+  $json->{has_handoff} = 1 if $session_data->{handoff_request};
   delete $session_data->{action};
   return $class->write_session_log ($app, $session_row, $time,
       force => 1, extra_data => $log_extra)->then (sub {

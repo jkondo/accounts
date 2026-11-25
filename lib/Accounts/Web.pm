@@ -177,6 +177,7 @@ sub next_page ($$$) {
 
 use Accounts::AppServer;
 use Accounts::Web::Login;
+use Accounts::Web::Handoff;
 use Accounts::Web::Groups;
 use Accounts::Web::Media;
 
@@ -216,6 +217,10 @@ sub main ($$) {
     return Accounts::Web::Media->icon ($app, $path);
   }
 
+  if (@$path == 3 and $path->[0] eq 'session' and $path->[1] eq 'handoff') {
+    return Accounts::Web::Handoff->main ($app, $path->[2]);
+  }
+
   if (@$path == 1 and $path->[0] eq 'session') {
     ## /session - Ensure that there is a session
     ##
@@ -244,22 +249,8 @@ sub main ($$) {
         }
       }
 
-      $sk = id 100;
-      my $age = $MaxSessionTimeout;
-      my $ma = $app->config->get ('session_max_age') || 'Infinity';
-      $age = $ma if $ma < $age;
-      return $app->db->uuid_short (1)->then (sub {
-        my $session_id = $_[0]->[0];
-        my $data = {session_id => '' . $session_id};
-        return $app->db->insert ('session', [{
-          sk => $sk,
-          sk_context => $sk_context,
-          created => $time,
-          expires => $time + $age,
-          data => Dongry::Type->serialize ('json', $data),
-        }], source_name => 'master');
-      })->then (sub {
-        $session_row = $_[0]->first_as_row;
+      return $class->create_session ($app, $app->db, sk_context => $sk_context)->then (sub {
+        $session_row = $_[0];
         return [$session_row, 1];
       });
     })->then (sub {
@@ -960,6 +951,23 @@ sub main ($$) {
   return $app->send_error (404);
 } # main
 
+# Shared by ordinary login and the one-time native handoff. Callers determine
+# identity; this helper only creates a fresh regular session with the usual TTL.
+sub create_session {
+  my ($class, $app, $db, %args) = @_;
+  my $age = $MaxSessionTimeout;
+  my $ma = $app->config->get ('session_max_age') || 'Infinity';
+  $age = $ma if $ma < $age;
+  my $now = time;
+  return $db->execute ('SELECT UUID_SHORT() AS id', {}, source_name => 'master')->then (sub {
+    return $db->insert ('session', [{
+      sk => $args{sk} // id 100, sk_context => $args{sk_context},
+      created => $now, expires => $now + $age,
+      data => Dongry::Type->serialize ('json', {%{$args{data} || {}}, session_id => ''.$_[0]->first->{id}}),
+    }], source_name => 'master');
+  })->then (sub { return $_[0]->first_as_row });
+}
+
 sub resume_session ($$;$) {
   my ($class, $app, $tr) = @_;
   my $sk = $app->bare_param ('sk') // '';
@@ -1001,7 +1009,7 @@ sub write_session_log ($$$$;%) {
     my $session_data = $session_row->get ('data');
     my $aid = $session_data->{account_id};
     my $sid = $session_data->{session_id};
-    return $app->db->insert ('session_recent_log', [{
+    return ($args{db} // $app->db)->insert ('session_recent_log', [{
       sk => $session_row->get ('sk'),
       sk_context => $session_row->get ('sk_context'),
       account_id => $aid ? 0+$aid : 0,
