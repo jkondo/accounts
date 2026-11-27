@@ -266,7 +266,8 @@ sub login ($$$) {
       }) : Promise->reject ($app->send_error_json ({reason => 'Not a loginable |server|'})))->then (sub {
         my $auth_url = $_[0];
         return $session_row->update ({data => $session_data}, source_name => 'master')->then (sub {
-          return $app->send_json ({authorization_url => $auth_url});
+          return $app->send_json ({authorization_url => $auth_url,
+              ($session_data->{handoff_request} ? (callback_state => $state) : ())});
         });
       })->then (sub {
         return $class->delete_old_sessions ($app);
@@ -1955,8 +1956,12 @@ sub finalize_login_session ($$$) {
     }
   }
 
+  $session_data->{handoff_audit} = $log_extra if $session_data->{handoff_login};
   Accounts::Web::Handoff->verified ($session_data);
-  $json->{has_handoff} = 1 if $session_data->{handoff_request};
+  if ($session_data->{handoff_request}) {
+    $json->{has_handoff} = 1;
+    $json->{account_id} = $session_data->{account_id};
+  }
   delete $session_data->{action};
   return $class->write_session_log ($app, $session_row, $time,
       force => 1, extra_data => $log_extra)->then (sub {
